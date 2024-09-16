@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Map with Leaflet</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+    <style>
+        body, html {
+            height: 100%;
+            margin: 0;
+        }
+        #map {
+            height: 100vh;  /* Fullscreen height */
+            width: 100vw;   /* Fullscreen width */
+            z-index: 0;  /* Keep the map always behind everything */
+        }
+
+        .leaflet-container {
+            background: #eee;
+        }
+
+        /* Ensure the note form is always visible, centered, and on top of the map */
+        #note-form {
+            position: fixed;  /* Fixed positioning so it stays in the same spot */
+            top: 50%;  /* Center vertically */
+            left: 50%;  /* Center horizontally */
+            transform: translate(-50%, -50%);  /* Offset to ensure true centering */
+            background-color: white;
+            padding: 15px;
+            border: 1px solid #ccc;
+            box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.1);
+            z-index: 1000;  /* Ensure it is on top of the map */
+            display: none;  /* Hidden by default */
+        }
+
+        /* Adjust auth buttons positioning and ensure they are always in front */
+        #auth-buttons {
+            position: fixed;
+            top: 10px;
+            left: 50px;  /* Moved to avoid zoom controls */
+            padding: 5px;
+            z-index: 1000;  /* Ensure it's always on top */
+        }
+
+        /* Pin filter dropdown */
+        #pin-filter {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px;
+            z-index: 1000;  /* Ensure it's always on top */
+        }
+
+        /* Dropdown for pin types */
+        #pin-type-selector {
+            position: fixed;
+            top: 10px;
+            left: 150px;  /* Add space for the selector */
+            padding: 5px;
+            z-index: 1000;  /* Ensure it's always on top */
+        }
+
+        /* Add a close button to the note form */
+        #close-note-form {
+            display: block;
+            margin-top: 10px;
+            color: red;
+            cursor: pointer;
+            text-align: right;
+        }
+
+        /* Notification box for non-authenticated users */
+        #notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px;
+            background-color: #ffcccc;
+            border: 1px solid #ff0000;
+            color: #ff0000;
+            z-index: 1000;
+            display: none;  /* Initially hidden */
+        }
+
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <!-- Pin filter dropdown -->
+    <select id="pin-filter">
+        <option value="all">All Pins</option>
+        <option value="my_pins">My Pins</option>
+    </select>
+
+    <!-- Pin type selector for custom icons -->
+    <select id="pin-type-selector">
+        <option value="default">Default Pin</option>
+        <option value="plant">Plant Pin</option>
+        <option value="animal">Animal Pin</option>
+    </select>
+
+    <!-- Auth buttons -->
+    <div id="auth-buttons">
+        {% if current_user.is_authenticated %}
+            <a href="/logout">Logout</a>
+        {% else %}
+            <a href="/login">Login</a> |
+            <a href="/register">Register</a>
+        {% endif %}
+    </div>
+
+    <!-- Notification for non-authenticated users -->
+    <div id="notification">
+        You must be logged in to add a pin. Please <a href="/login">Login</a> or <a href="/register">Sign Up</a>.
+    </div>
+
+    <!-- Note form (Add Note) -->
+    <div id="note-form">
+        <h3>Add Note</h3>
+        <textarea id="note-text" rows="4" cols="30" placeholder="Enter a note..."></textarea>
+        <button id="save-note">Save Note</button>
+        <span id="close-note-form">Cancel</span>  <!-- Close button added -->
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <script>
+        // Make currentUserId and isAdmin available to JS from Flask
+        let currentUserId = {{ current_user.id if current_user.is_authenticated else 'null' }};
+        let isAdmin = {{ 'true' if current_user.is_admin else 'false' }};
+
+        const plantIconUrl = '/static/flat.png';  // Path to the plant pin icon
+        const defaultIconUrl = 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png';  // Default Leaflet marker
+
+        let map;
+        const mapImageUrl = '/static/frontiermap.jpeg';  // Path to the map image
+        const imageWidth = 5187;  // Updated width of the map image
+        const imageHeight = 3514;  // Updated height of the map image
+        let isAddingPin = false;  // Track whether the user is currently adding a pin
+
+        const mapBounds = [[0, 0], [imageHeight, imageWidth]];  // Set based on the updated map's image dimensions
+
+        // Initialize the map
+        map = L.map('map', {
+            crs: L.CRS.Simple,
+            maxZoom: 2,  // Allow zooming in close
+            minZoom: -2,  // Allow zooming out to see the entire map
+            zoomControl: true
+        });
+
+        // Add the image overlay as the map layer
+        const imageLayer = L.imageOverlay(mapImageUrl, mapBounds).addTo(map);
+
+        // Set the map bounds so it doesn't go out of view
+        map.setMaxBounds(mapBounds);
+
+        // Fit the map to the screen but allow zooming out for full view
+        map.fitBounds(mapBounds);
+
+        // Define the default icon
+        const defaultIcon = L.icon({
+            iconUrl: defaultIconUrl,
+            iconSize: [25, 41],  // Default icon size
+            iconAnchor: [12, 41],  // Anchoring point of the icon
+            popupAnchor: [1, -34],  // Where the popup will open relative to the icon
+        });
+
+        // Define the plant icon
+        const plantIcon = L.icon({
+            iconUrl: plantIconUrl,
+            iconSize: [25, 41],  // Same size as the default icon
+            iconAnchor: [12, 41],
+            popupAnchor: [1, -34],
+        });
+
+        // Function to add a pin to the map with appropriate icons
+        function addPin(x, y, note, pin_id, user_id, type = 'default') {
+            console.log(`Adding pin at (${x}, ${y}) with note: ${note} and type: ${type}`);
+
+            let markerIcon;
+            if (type === 'plant') {
+                markerIcon = plantIcon;
+            } else {
+                markerIcon = defaultIcon;
+            }
+
+            const marker = L.marker([y, x], { icon: markerIcon }).addTo(map);
+            let popupContent = `<p>${note}</p>`;
+
+            // Add edit and delete buttons for the owner or admin
+            if (currentUserId == user_id || isAdmin == 'true') {
+                popupContent += `
+                    <button onclick="editPin(${pin_id}, '${note}')">Edit</button>
+                    <button onclick="deletePin(${pin_id})">Delete</button>
+                `;
+            }
+
+            marker.bindPopup(popupContent);
+
+            // Ensure clicking on the pin only opens the popup and doesn't trigger pin creation
+            marker.on('click', function(e) {
+                console.log("Pin clicked, opening popup...");
+                marker.openPopup();  // Open popup when the pin is clicked
+                e.originalEvent.stopPropagation();  // Stop event from bubbling to the map click handler
+            });
+        }
+
+        // Function to handle clicks to add a new pin
+        map.on('click', function (e) {
+            if (currentUserId === 'null') {
+                showNotification();
+            } else if (!isAddingPin) {
+                const x = e.latlng.lng;
+                const y = e.latlng.lat;
+                console.log(`Map clicked at (${x}, ${y}), showing form to add pin.`);
+                showNoteForm(x, y);
+            }
+        });
+
+        // Function to show the note form when the user clicks on the map
+        function showNoteForm(x, y) {
+            isAddingPin = true;  // Set to true to prevent accidental multiple pins
+            const noteForm = document.getElementById('note-form');
+            noteForm.style.display = 'block';
+            document.getElementById('save-note').onclick = function () {
+                const note = document.getElementById('note-text').value;
+                const pinType = document.getElementById('pin-type-selector').value;
+                if (note.trim()) {
+                    console.log(`Saving pin at (${x}, ${y}) with note: ${note} and type: ${pinType}`);
+                    savePin(x, y, note, pinType);
+                    noteForm.style.display = 'none';
+                    document.getElementById('note-text').value = '';
+                }
+                isAddingPin = false;  // Reset after saving
+            };
+        }
+
+        // Function to close the note form when the user clicks "Cancel"
+        document.getElementById('close-note-form').onclick = function () {
+            document.getElementById('note-form').style.display = 'none';
+            isAddingPin = false;  // Reset to allow adding new pins again
+        };
+
+        // Function to show a notification to users not logged in
+        function showNotification() {
+            const notification = document.getElementById('notification');
+            notification.style.display = 'block';
+            setTimeout(() => {
+                notification.style.display = 'none';
+            }, 4000);  // Hide after 4 seconds
+        }
+
+        // Function to save the pin to the backend
+        function savePin(x, y, note, pinType) {
+            fetch('/add_pin', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ x, y, note, type: pinType })
+            })
+            .then(response => {
+                if (response.ok) {
+                    console.log('Pin saved successfully, reloading pins...');
+                    loadPins();  // Reload pins after saving
+                } else {
+                    console.error('Failed to save pin:', response.status);
+                }
+            });
+        }
+
+        // Function to edit a pin
+        function editPin(pin_id, current_note) {
+            const new_note = prompt('Edit the note:', current_note);
+            if (new_note) {
+                console.log(`Editing pin ${pin_id} with new note: ${new_note}`);
+                fetch(`/edit_pin/${pin_id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note: new_note })
+                })
+                .then(() => loadPins());  // Reload pins after editing
+            }
+        }
+
+        // Function to delete a pin
+        function deletePin(pin_id) {
+            console.log(`Deleting pin ${pin_id}`);
+            fetch(`/delete_pin/${pin_id}`, {
+                method: 'POST'
+            }).then(() => loadPins());  // Reload pins after deletion
+        }
+
+        // Load pins and render them correctly
+        function loadPins(filter = 'all') {
+            console.log("Loading pins...");
+            const url = filter === 'my_pins' ? '/get_pins?filter=my_pins' : '/get_pins';
+
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Pins loaded:", data);
+                    // Clear existing markers
+                    map.eachLayer(function (layer) {
+                        if (layer instanceof L.Marker && !layer.options.permanent) {
+                            map.removeLayer(layer);
+                        }
+                    });
+
+                    data.forEach(pinData => {
+                        addPin(pinData.x, pinData.y, pinData.note, pinData.id, pinData.user_id, pinData.type);
+                    });
+                })
+                .catch(error => console.error('Error fetching pins:', error));
+        }
+
+        // Load pins on map initialization
+        window.onload = () => {
+            loadPins();
+        };
+    </script>
+</body>
+</html>
